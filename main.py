@@ -14,7 +14,25 @@ import torchvision.datasets as datasets
 
 from resnet import ResNet
 from utils import progress_bar
+import numpy as np
 
+def rand_bbox(size, lam):
+    W = size[2]
+    H = size[3]
+    cut_rat = np.sqrt(1. - lam)
+    cut_w = np.int(W * cut_rat)
+    cut_h = np.int(H * cut_rat)
+
+    # uniform
+    cx = np.random.randint(W)
+    cy = np.random.randint(H)
+
+    bbx1 = np.clip(cx - cut_w // 2, 0, W)
+    bby1 = np.clip(cy - cut_h // 2, 0, H)
+    bbx2 = np.clip(cx + cut_w // 2, 0, W)
+    bby2 = np.clip(cy + cut_h // 2, 0, H)
+
+    return bbx1, bby1, bbx2, bby2
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
 parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
@@ -28,7 +46,7 @@ start_epoch = 0  # start from epoch 0 or last checkpoint epoch
 
 # Data
 print('==> Preparing data..')
-path = "/workspace/IMAGENET/ILSVRC/Data/CLS-LOC/"
+path = "/Data/ILSVRC/Data/CLS-LOC"
 
 traindir = os.path.join(path, 'train')
 valdir = os.path.join(path, 'val')
@@ -42,7 +60,7 @@ train_loader = torch.utils.data.DataLoader(
         normalize,
     ])),
     batch_size=256, shuffle=True,
-    num_workers=4, pin_memory=True)
+    num_workers=8, pin_memory=True)
 
 val_loader = torch.utils.data.DataLoader(
     datasets.ImageFolder(valdir, transforms.Compose([
@@ -52,7 +70,7 @@ val_loader = torch.utils.data.DataLoader(
         normalize,
     ])),
     batch_size=256, shuffle=False,
-    num_workers=4, pin_memory=True)
+    num_workers=8, pin_memory=True)
 
 print('==> Building model..')
 net = ResNet(depth=50)
@@ -72,7 +90,7 @@ if args.resume:
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)
-scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[30,60])
+scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[75,150,225])
 
 # Training
 def train(epoch):
@@ -83,9 +101,17 @@ def train(epoch):
     total = 0
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         inputs, targets = inputs.to(device), targets.to(device)
+        lam = np.random.beta(1.0, 1.0)
+        rand_index = torch.randperm(inputs.size()[0]).cuda()
+        target_a = targets
+        target_b = targets[rand_index]
+        bbx1, bby1, bbx2, bby2 = rand_bbox(inputs.size(), lam)
+        inputs[:, :, bbx1:bbx2, bby1:bby2] = inputs[rand_index, :, bbx1:bbx2, bby1:bby2]
+        # adjust lambda to exactly match pixel ratio
+        lam = 1 - ((bbx2 - bbx1) * (bby2 - bby1) / (inputs.size()[-1] * inputs.size()[-2]))
         optimizer.zero_grad()
         outputs = net(inputs)
-        loss = criterion(outputs, targets)
+        loss = criterion(outputs, target_a) * lam + criterion(outputs, target_b) * (1. - lam)
         loss.backward()
         optimizer.step()
 
@@ -136,6 +162,6 @@ def test(epoch):
         best_acc = acc
 
 
-for epoch in range(start_epoch, 90):
+for epoch in range(start_epoch, 300):
     train(epoch)
     test(epoch)
